@@ -210,7 +210,7 @@ def main():
     if args.list:
         list_attachments(bug)
     elif args.attach:
-        process_attachment(bug, args.attach, args.nocleanup)
+        process_attachment(bug, args.attach, args.nocleanup, args.extract_only)
 
 if __name__ == '__main__':
     main()
