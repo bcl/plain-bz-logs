@@ -134,6 +134,7 @@ def process_attachment(bug, attachment_id, nocleanup=False, extractonly=False):
 
     # Extract the contents of the archive into tmp_path
     try:
+        log.info("Extracting files from %s", attachment_file)
         if tarfile.is_tarfile(attachment_file):
             subprocess.check_call(["tar", "-xvf", attachment_file], cwd=tmp_path)
         elif zipfile.is_zipfile(attachment_file):
@@ -154,6 +155,7 @@ def process_attachment(bug, attachment_id, nocleanup=False, extractonly=False):
             break
 
     # Show user list of new attachments
+    print("\n\nLog files to be attached to %s:\n" % bug.bug_id)
     for f in attach_logs:
         print(f)
     if not extractonly:
