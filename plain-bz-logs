@@ -1,0 +1,216 @@
+#!/usr/bin/python3
+#
+# plain-bz-logs - extract anaconda logs from a compressed archive and attach
+#                 them to the bug as text/plain attachments
+#
+# Copyright (C) 2015  Red Hat, Inc.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 2.1 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Author: Brian C. Lane <bcl@redhat.com>
+import logging
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger("bugzilla")
+log.setLevel(logging.INFO)
+
+import os
+import sys
+import bugzilla
+import argparse
+import shutil
+import tarfile
+import zipfile
+import subprocess
+import xmlrpc.client
+
+
+BZSERVER = "bugzilla.redhat.com"
+BZURL = "https://%s/xmlrpc.cgi" % BZSERVER
+RHBZAUTH = os.path.realpath(os.getenv('HOME') + '/.rhbzauth')
+
+def setup_args():
+    """ Return argparse.Parser object of cmdline."""
+    parser = argparse.ArgumentParser(description="Extract Anaconda logs from an archive and attach to bz#")
+    parser.add_argument("-l", "--list", action="store_true", help="List attachments")
+    parser.add_argument("-a", "--attach", metavar="ID", type=int, help="Attachment id to process")
+    parser.add_argument("-x", "--extract-only", action="store_true", help="Download and extract, don't attach")
+    parser.add_argument("--nocleanup", action="store_true", help="Don't remove temporary files")
+    parser.add_argument("--debug", action="store_true", help="Turn on debug logging")
+    parser.add_argument("bznum", help="Bugzilla number")
+
+    args = parser.parse_args()
+
+    if not args.list and not args.attach:
+        parser.error("--list or --attach needs to be passed.")
+
+    return args
+
+
+
+def list_attachments(bug):
+    """ List the bug's attachments
+
+        :param bug: A Bugzilla Bug instance
+    """
+    # bug.attachments is a list of dicts with attachment ids
+    # useful info from the dict is:
+    #   file_name
+    #   id
+    #   description
+    #   summary
+    #   content_type
+    #   is_obsolete?
+    for attachment in bug.attachments:
+        print("{id:<10} {file_name:<20} {content_type:24} : {description}".format(**attachment))
+
+
+def attach_files(bug, files, archivename, mimetype="text/plain"):
+    """ Attach a list of files to a bug
+
+        :param bug: A Bugzilla Bug instance
+        :param list files: A list of files to attach, full paths included.
+        :param string archivename: Name of the archive the files were extracted from
+        :param string mimetype: MIME type to set for all the files. Defaults to text/plain
+    """
+    kwargs = {}
+    kwargs["contenttype"] = mimetype
+
+    for fname in files:
+        # Bugzilla doesn't like to attach empty files
+        stat = os.stat(fname)
+        if stat.st_size == 0:
+            log.info("Skipping 0-byte %s", fname)
+            continue
+
+        desc = "%s extracted from %s" % (os.path.basename(fname), archivename)
+        with open(fname, "rb") as fobj:
+            try:
+                attach_id = bug.bugzilla.attachfile(bug.bug_id, fobj, desc, **kwargs)
+                log.info("Created attachment %d for %s", attach_id, os.path.basename(fname))
+            except xmlrpc.client.Fault  as e:
+                log.error("Problem creating attachment for %s: %s", fname, e)
+
+
+def process_attachment(bug, attachment_id, nocleanup=False, extractonly=False):
+    """ Download attachment, try to extract logs, prompt user to attach text/plain logs
+
+        :param bug: A Bugzilla Bug instance
+        :param int attachment_id: The ID of the attachment to download
+        :param bool nocleanup: Skip cleaning up the files if True
+        :param bool extractonly: Skip cleanup and uploading extracted files if True
+    """
+    tmp_path = "/var/tmp/bzlogs-%s" % bug.bug_id
+
+    attachment = [a for a in bug.attachments if a["id"] == attachment_id]
+    if not attachment or len(attachment) > 1:
+        log.error("Problem finding attachment %s", attachment_id)
+        return
+    attachment = attachment[0]
+
+    attachment_file = tmp_path+"/"+os.path.basename(attachment["file_name"])
+
+    # If the directory exists, assume it has already been downloaded
+    if not os.path.exists(tmp_path):
+        os.mkdir(tmp_path)
+        # Download the attachment
+        with bug.bugzilla.openattachment(attachment_id) as f_bz:
+            with open(attachment_file, "wb") as f_att:
+                data = f_bz.read(1024**2)
+                while data:
+                    f_att.write(data)
+                    data = f_bz.read(1024**2)
+        log.info("Wrote attachment %s to %s", attachment_id, attachment_file)
+
+    # Extract the contents of the archive into tmp_path
+    try:
+        if tarfile.is_tarfile(attachment_file):
+            subprocess.check_call(["tar", "-xvf", attachment_file], cwd=tmp_path)
+        elif zipfile.is_zipfile(attachment_file):
+            subprocess.check_call(["unzip", attachment_file], cwd=tmp_path)
+    except subprocess.CalledProcessError as e:
+        log.error("Problem extracting %s: %s", attachment_file, e)
+        return
+
+    # Gather up list of files to attach
+    # If anaconda-tb-* is found, stop there.
+    # If anaconda.log is found, gather its sibling *log files
+    for root, _dirs, files in os.walk(tmp_path):
+        attach_logs = [os.path.join(root, f) for f in files if f.startswith("anaconda-tb-")]
+        if attach_logs:
+            break
+        if "anaconda.log" in files:
+            attach_logs = [os.path.join(root, f) for f in files if f.endswith("log")]
+            break
+
+    # Show user list of new attachments
+    for f in attach_logs:
+        print(f)
+    if not extractonly:
+        ok = input("\nEnter YES to attach these logs to bz#%s :> " % bug.bug_id)
+        if ok == "YES":
+            attach_files(bug, attach_logs, os.path.basename(attachment_file))
+
+        if not nocleanup:
+            shutil.rmtree(tmp_path)
+    else:
+        print("Results are in %s" % tmp_path)
+
+
+def main():
+    """ Parse cmdline arguments, extract BZ username and password, connect to
+        Bugzilla's xmlrpc interface and execute the commands.
+    """
+    args = setup_args()
+
+    if os.path.isfile(RHBZAUTH):
+        username = None
+        password = None
+        errors = []
+        with open(RHBZAUTH, 'r') as f:
+            for line in f.readlines():
+                if not line:
+                    continue
+                line = line.strip()
+                if line.startswith('RHBZ_USER='):
+                    username = line[10:].strip('"\'')
+                elif line.startswith('RHBZ_PASSWORD='):
+                    password = line[14:].strip('"\'')
+        if not username:
+            errors.append("RHBZ_USER is missing from %s" % RHBZAUTH)
+        if not password:
+            errors.append("RHBZ_PASSWORD is missing from %s" % RHBZAUTH)
+        if errors:
+            for e in errors:
+                log.error(e)
+            sys.exit(1)
+    else:
+        print("%s is missing. Please create it with RHBZ_USER and RHBZ_PASSWORD set." % RHBZAUTH)
+        sys.exit(1)
+
+    bz = bugzilla.Bugzilla(url=BZURL)
+
+    # XXX What's the expected result here?
+    rc = bz.login(username, password)
+    log.debug("login rc = %s", rc)
+
+    bug = bz.getbug(args.bznum)
+    log.debug("bug = %s", bug)
+
+    if args.list:
+        list_attachments(bug)
+    elif args.attach:
+        process_attachment(bug, args.attach, args.nocleanup)
+
+if __name__ == '__main__':
+    main()
