@@ -120,9 +120,10 @@ def process_attachment(bug, attachment_id, nocleanup=False, extractonly=False):
 
     attachment_file = tmp_path+"/"+os.path.basename(attachment["file_name"])
 
-    # If the directory exists, assume it has already been downloaded
     if not os.path.exists(tmp_path):
         os.mkdir(tmp_path)
+
+    if not os.path.exists(attachment_file):
         # Download the attachment
         with bug.bugzilla.openattachment(attachment_id) as f_bz:
             with open(attachment_file, "wb") as f_att:
