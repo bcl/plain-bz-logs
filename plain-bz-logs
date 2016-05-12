@@ -145,10 +145,10 @@ def process_attachment(bug, attachment_id, nocleanup=False, extractonly=False):
         return
 
     # Gather up list of files to attach
-    # If anaconda-tb-* is found, stop there.
+    # If anaconda-tb* is found, stop there.
     # If anaconda.log is found, gather its sibling *log files
     for root, _dirs, files in os.walk(tmp_path):
-        attach_logs = [os.path.join(root, f) for f in files if f.startswith("anaconda-tb-")]
+        attach_logs = [os.path.join(root, f) for f in files if f.startswith("anaconda-tb")]
         if attach_logs:
             break
         if "anaconda.log" in files:
